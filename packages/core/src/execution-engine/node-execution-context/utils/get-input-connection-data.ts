@@ -225,8 +225,7 @@ export async function getInputConnectionData(
 		);
 	}
 
-	const nodes: SupplyData[] = [];
-	for (const connectedNode of connectedNodes) {
+	const nodePromises = connectedNodes.map<Promise<SupplyData>>(async (connectedNode) => {
 		const connectedNodeType = workflow.nodeTypes.getByNameAndVersion(
 			connectedNode.type,
 			connectedNode.typeVersion,
@@ -254,13 +253,13 @@ export async function getInputConnectionData(
 					node: connectedNode,
 					nodeType: connectedNodeType,
 					handleToolInvocation: makeHandleToolInvocation(
-						(i) => contextFactory(i, {}),
+						(i) => contextFactory(i, {}) as ISupplyDataFunctions,
 						connectedNode,
 						connectedNodeType,
 						runExecutionData,
 					),
 				});
-				nodes.push(supplyData);
+				return supplyData;
 			} else {
 				throw new ApplicationError('Node does not have a `supplyData` method defined', {
 					extra: { nodeName: connectedNode.name },
@@ -269,11 +268,14 @@ export async function getInputConnectionData(
 		} else {
 			const context = contextFactory(parentRunIndex, parentInputData);
 			try {
-				const supplyData = await connectedNodeType.supplyData.call(context, itemIndex);
+				const supplyData = await connectedNodeType.supplyData.call(
+					context as ISupplyDataFunctions,
+					itemIndex,
+				);
 				if (supplyData.closeFunction) {
 					closeFunctions.push(supplyData.closeFunction);
 				}
-				nodes.push(supplyData);
+				return supplyData;
 			} catch (error) {
 				// Propagate errors from sub-nodes
 				if (error instanceof ExecutionBaseError) {
@@ -307,7 +309,20 @@ export async function getInputConnectionData(
 				});
 			}
 		}
+	});
+
+	const nodeResults = await Promise.allSettled(nodePromises);
+
+	// Check for any rejected promises and throw the first error
+	const firstRejection = nodeResults.find(
+		(result): result is PromiseRejectedResult => result.status === 'rejected',
+	);
+	if (firstRejection) {
+		throw firstRejection.reason;
 	}
+
+	// Extract the fulfilled values
+	const nodes = nodeResults.map((result) => (result as PromiseFulfilledResult<SupplyData>).value);
 
 	return maxConnections === 1 ? (nodes || [])[0]?.response : nodes.map((node) => node.response);
 }
